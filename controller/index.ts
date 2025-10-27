@@ -210,7 +210,6 @@ router.put("/profile/:id", async (req, res) => {
 router.post("/admin_add/games", async (req, res) => {
   try {
     const { name, price, category, description, imageUrl } = req.body;
-
     if (!name || !price || !category)
       return res.status(400).send({ message: "กรอกข้อมูลให้ครบ" });
 
@@ -220,14 +219,14 @@ router.post("/admin_add/games", async (req, res) => {
       category,
       description: description || "",
       imageUrl: imageUrl || "",
-      releaseDate: new Date(),
-      createdAt: new Date(),
+      // ⬇️ กำหนดอัตโนมัติด้วยเวลาจากเซิร์ฟเวอร์
+      releaseDate: serverTimestamp(),
+      createdAt: serverTimestamp(),
     };
 
     const ref = await addDoc(collection(db, "games"), newGame);
     res.status(201).send({ message: "เพิ่มเกมสำเร็จ ✅", id: ref.id });
-  } catch (err: any) {
-    console.error(err);
+  } catch (err:any) {
     res.status(500).send({ message: "เพิ่มเกมไม่สำเร็จ ❌", error: err.message });
   }
 });
@@ -278,21 +277,21 @@ router.get("/admin_search/games/:id", async (req, res) => {
 // ✅ 2.4 แก้ไขข้อมูลเกม (Update)
 router.put("/admin_update/games/:id", async (req, res) => {
   try {
-    const { name, price, category, description, imageUrl } = req.body;
+    const { name, price, category, description, imageUrl, releaseDate } = req.body;
     const gameRef = doc(db, "games", req.params.id);
 
-    const updateData: any = {
-      updatedAt: new Date(),
-    };
-    if (name) updateData.name = name;
-    if (price) updateData.price = price;
-    if (category) updateData.category = category;
-    if (description) updateData.description = description;
-    if (imageUrl) updateData.imageUrl = imageUrl;
+    const updateData:any = { updatedAt: serverTimestamp() };
+    if (name !== undefined) updateData.name = name;
+    if (price !== undefined) updateData.price = price;
+    if (category !== undefined) updateData.category = category;
+    if (description !== undefined) updateData.description = description;
+    if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
+    // ⬇️ อนุญาตให้แก้ releaseDate เฉพาะกรณีที่ต้องการ “ตั้งใหม่” จริง ๆ
+    if (releaseDate !== undefined) updateData.releaseDate = releaseDate;
 
     await updateDoc(gameRef, updateData);
     res.send({ message: "อัปเดตข้อมูลเกมสำเร็จ ✅" });
-  } catch (err: any) {
+  } catch (err:any) {
     res.status(500).send({ message: "อัปเดตข้อมูลไม่สำเร็จ ❌", error: err.message });
   }
 });
@@ -346,9 +345,7 @@ const upload = multer({ storage });
 // ✅ เส้นทางอัปโหลดรูปภาพเกม
 router.post("/admin_upload/game-image", upload.single("image"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).send({ message: "กรุณาอัปโหลดไฟล์รูปภาพ" });
-    }
+    if (!req.file) return res.status(400).send({ message: "กรุณาอัปโหลดไฟล์รูปภาพ" });
 
     const { name, price, category, description } = req.body;
 
@@ -361,19 +358,19 @@ router.post("/admin_upload/game-image", upload.single("image"), async (req, res)
       price: Number(price),
       category,
       description: description || "",
+<<<<<<< Updated upstream
       imageUrl, // ✅ ใช้ URL จาก Cloudinary
       createdAt: new Date(),
+=======
+      imageUrl,
+      releaseDate: serverTimestamp(), // ⬅️ อัตโนมัติ
+      createdAt: serverTimestamp(),   // ⬅️ อัตโนมัติ
+>>>>>>> Stashed changes
     };
 
     const ref = await addDoc(collection(db, "games"), gameData);
-
-    res.send({
-      message: "อัปโหลดรูปเกมพร้อมเพิ่มข้อมูลสำเร็จ ✅",
-      id: ref.id,
-      imageUrl,
-    });
-  } catch (err: any) {
-    console.error("❌ Upload Error:", err);
+    res.send({ message: "อัปโหลดรูปเกมพร้อมเพิ่มข้อมูลสำเร็จ ✅", id: ref.id, imageUrl });
+  } catch (err:any) {
     res.status(500).send({ message: "อัปโหลดรูปภาพไม่สำเร็จ ❌", error: err.message });
   }
 });
@@ -809,7 +806,21 @@ router.post("/wallet_purchase", async (req, res) => {
   }
 });
 
-
+router.post("/admin_upload/image-only", upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).send({ message: "กรุณาอัปโหลดไฟล์รูปภาพ" });
+    }
+    const imageUrl = (req.file as any).path;
+    res.send({
+      message: "อัปโหลดรูปสำเร็จ ✅",
+      imageUrl,
+    });
+  } catch (err: any) {
+    console.error("❌ Upload Error:", err);
+    res.status(500).send({ message: "อัปโหลดรูปภาพไม่สำเร็จ ❌", error: err.message });
+  }
+});
 
 
 
