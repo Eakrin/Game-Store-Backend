@@ -4,8 +4,11 @@ import {
   collection,
   doc,
   getDocs,
+  increment,
   orderBy,
   query,
+  runTransaction,
+  serverTimestamp,
   setDoc,
   updateDoc,
   where
@@ -210,6 +213,7 @@ router.put("/profile/:id", async (req, res) => {
 router.post("/admin_add/games", async (req, res) => {
   try {
     const { name, price, category, description, imageUrl } = req.body;
+
     if (!name || !price || !category)
       return res.status(400).send({ message: "กรอกข้อมูลให้ครบ" });
 
@@ -219,14 +223,14 @@ router.post("/admin_add/games", async (req, res) => {
       category,
       description: description || "",
       imageUrl: imageUrl || "",
-      // ⬇️ กำหนดอัตโนมัติด้วยเวลาจากเซิร์ฟเวอร์
-      releaseDate: serverTimestamp(),
-      createdAt: serverTimestamp(),
+      releaseDate: new Date(),
+      createdAt: new Date(),
     };
 
     const ref = await addDoc(collection(db, "games"), newGame);
     res.status(201).send({ message: "เพิ่มเกมสำเร็จ ✅", id: ref.id });
-  } catch (err:any) {
+  } catch (err: any) {
+    console.error(err);
     res.status(500).send({ message: "เพิ่มเกมไม่สำเร็จ ❌", error: err.message });
   }
 });
@@ -277,21 +281,21 @@ router.get("/admin_search/games/:id", async (req, res) => {
 // ✅ 2.4 แก้ไขข้อมูลเกม (Update)
 router.put("/admin_update/games/:id", async (req, res) => {
   try {
-    const { name, price, category, description, imageUrl, releaseDate } = req.body;
+    const { name, price, category, description, imageUrl } = req.body;
     const gameRef = doc(db, "games", req.params.id);
 
-    const updateData:any = { updatedAt: serverTimestamp() };
-    if (name !== undefined) updateData.name = name;
-    if (price !== undefined) updateData.price = price;
-    if (category !== undefined) updateData.category = category;
-    if (description !== undefined) updateData.description = description;
-    if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
-    // ⬇️ อนุญาตให้แก้ releaseDate เฉพาะกรณีที่ต้องการ “ตั้งใหม่” จริง ๆ
-    if (releaseDate !== undefined) updateData.releaseDate = releaseDate;
+    const updateData: any = {
+      updatedAt: new Date(),
+    };
+    if (name) updateData.name = name;
+    if (price) updateData.price = price;
+    if (category) updateData.category = category;
+    if (description) updateData.description = description;
+    if (imageUrl) updateData.imageUrl = imageUrl;
 
     await updateDoc(gameRef, updateData);
     res.send({ message: "อัปเดตข้อมูลเกมสำเร็จ ✅" });
-  } catch (err:any) {
+  } catch (err: any) {
     res.status(500).send({ message: "อัปเดตข้อมูลไม่สำเร็จ ❌", error: err.message });
   }
 });
@@ -329,6 +333,7 @@ cloudinary.config({
   api_secret: process.env.CLOUD_API_SECRET!,
 });
 
+const mem = multer({ storage: multer.memoryStorage() });
 
 // ✅ ตั้งค่า Storage ให้ multer ใช้ cloudinary
 const storage = new CloudinaryStorage({
@@ -345,7 +350,9 @@ const upload = multer({ storage });
 // ✅ เส้นทางอัปโหลดรูปภาพเกม
 router.post("/admin_upload/game-image", upload.single("image"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).send({ message: "กรุณาอัปโหลดไฟล์รูปภาพ" });
+    if (!req.file) {
+      return res.status(400).send({ message: "กรุณาอัปโหลดไฟล์รูปภาพ" });
+    }
 
     const { name, price, category, description } = req.body;
 
@@ -358,19 +365,19 @@ router.post("/admin_upload/game-image", upload.single("image"), async (req, res)
       price: Number(price),
       category,
       description: description || "",
-<<<<<<< Updated upstream
       imageUrl, // ✅ ใช้ URL จาก Cloudinary
       createdAt: new Date(),
-=======
-      imageUrl,
-      releaseDate: serverTimestamp(), // ⬅️ อัตโนมัติ
-      createdAt: serverTimestamp(),   // ⬅️ อัตโนมัติ
->>>>>>> Stashed changes
     };
 
     const ref = await addDoc(collection(db, "games"), gameData);
-    res.send({ message: "อัปโหลดรูปเกมพร้อมเพิ่มข้อมูลสำเร็จ ✅", id: ref.id, imageUrl });
-  } catch (err:any) {
+
+    res.send({
+      message: "อัปโหลดรูปเกมพร้อมเพิ่มข้อมูลสำเร็จ ✅",
+      id: ref.id,
+      imageUrl,
+    });
+  } catch (err: any) {
+    console.error("❌ Upload Error:", err);
     res.status(500).send({ message: "อัปโหลดรูปภาพไม่สำเร็จ ❌", error: err.message });
   }
 });
@@ -505,62 +512,66 @@ router.get("/wallet/:userId", async (req, res) => {
 
 
 // ✅ 3.2 เติมเงินเข้ากระเป๋า (Top-up)
+// /wallet_topup (เวอร์ชันกัน race + กันยิงซ้ำ)
 router.post("/wallet_topup", async (req, res) => {
   try {
-    const { userId, amount } = req.body;
+    const { userId, amount, requestId } = req.body;
+    const amt = Number(amount);
 
-    // ✅ ตรวจสอบข้อมูล
-    if (!userId || amount === undefined)
-      return res.status(400).send({ message: "กรุณาระบุ userId และจำนวนเงิน" });
-
-    if (amount <= 0)
-      return res.status(400).send({ message: "จำนวนเงินต้องมากกว่า 0" });
-
-    // 🔹 อ้างอิงกระเป๋าใน Firestore
-    const walletRef = doc(db, "wallets", userId);
-    const walletSnap = await getDoc(walletRef);
-
-    let newBalance = amount;
-
-    if (!walletSnap.exists()) {
-      // 🔹 ถ้ายังไม่มีกระเป๋า ให้สร้างใหม่
-      await setDoc(walletRef, {
-        balance: amount,
-        lastUpdated: new Date(),
-      });
-    } else {
-      // 🔹 ถ้ามีอยู่แล้ว → บวกยอดเก่า
-      const currentBalance = walletSnap.data().balance ?? 0;
-      newBalance = currentBalance + amount;
-
-      await updateDoc(walletRef, {
-        balance: newBalance,
-        lastUpdated: new Date(),
-      });
+    if (!userId || !Number.isFinite(amt) || amt <= 0 || !requestId) {
+      return res.status(400).send({ message: "กรุณาระบุ userId, amount (>0) และ requestId" });
     }
 
-    // ✅ เพิ่มธุรกรรมลงใน Collection "transactions"
-    await addDoc(collection(db, "transactions"), {
-      userId,
-      type: "topup",
-      amount,
-      detail: "เติมเงินผ่านระบบ",
-      createdAt: new Date(),
+    const walletRef = doc(db, "wallets", userId);
+    const reqRef    = doc(db, "topup_requests", requestId);
+
+    const result = await runTransaction(db, async (tx) => {
+      // ถ้า requestId นี้เคยถูกประมวลผลแล้ว → อ่านค่าเดิมคืน
+      const reqSnap = await tx.get(reqRef);
+      if (reqSnap.exists()) {
+        return reqSnap.data(); // {balanceAfter, processedAt, ...}
+      }
+
+      // อ่าน wallet
+      const wSnap = await tx.get(walletRef);
+      const current = Number(wSnap.exists() ? (wSnap.data().balance ?? 0) : 0);
+      const balanceAfter = current + amt;
+
+      if (!wSnap.exists()) {
+        tx.set(walletRef, { balance: amt, lastUpdated: serverTimestamp() });
+      } else {
+        tx.update(walletRef, { balance: increment(amt), lastUpdated: serverTimestamp() });
+      }
+
+      // บันทึกธุรกรรม (ปลอดภัยใน txn เดียวกันถ้าต้องการ)
+      const txRef = doc(collection(db, "transactions"));
+      tx.set(txRef, {
+        userId,
+        type: "topup",
+        amount: amt,
+        detail: "เติมเงินผ่านระบบ",
+        createdAt: serverTimestamp(),
+        requestId,
+      });
+
+      // ทำเครื่องหมายว่า request นี้ “ประมวลผลแล้ว”
+      tx.set(reqRef, {
+        userId,
+        amount: amt,
+        balanceAfter,
+        processedAt: serverTimestamp(),
+      });
+
+      return { balanceAfter };
     });
 
-    res.send({
-      message: "เติมเงินสำเร็จ ✅",
-      balance: newBalance,
-      added: amount,
-    });
+    return res.send({ message: "เติมเงินสำเร็จ ✅", balance: result.balanceAfter });
   } catch (err: any) {
-    console.error("❌ Error top-up:", err);
-    res.status(500).send({
-      message: "เกิดข้อผิดพลาดในการเติมเงิน ❌",
-      error: err.message,
-    });
+    console.error("❌ topup error", err);
+    return res.status(500).send({ message: "เกิดข้อผิดพลาดในการเติมเงิน ❌", error: err.message });
   }
 });
+
 
 
 
@@ -806,21 +817,754 @@ router.post("/wallet_purchase", async (req, res) => {
   }
 });
 
-router.post("/admin_upload/image-only", upload.single("image"), async (req, res) => {
+// ✅ อัปโหลดรูปภาพ “อย่างเดียว” เพื่อเอา URL ไปอัปเดตเกม (ตอนแก้ไข)
+// index.ts (router)
+router.post("/admin_upload/image-only", mem.single("image"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).send({ message: "กรุณาอัปโหลดไฟล์รูปภาพ" });
     }
-    const imageUrl = (req.file as any).path;
-    res.send({
-      message: "อัปโหลดรูปสำเร็จ ✅",
-      imageUrl,
-    });
-  } catch (err: any) {
-    console.error("❌ Upload Error:", err);
-    res.status(500).send({ message: "อัปโหลดรูปภาพไม่สำเร็จ ❌", error: err.message });
+
+    const stream = cloudinary.uploader.upload_stream(
+      { folder: "game-store", resource_type: "image" },
+      (err, result) => {
+        if (err) {
+          console.error("Cloudinary error:", err);
+          return res.status(500).send({ message: "อัปโหลดรูปภาพไม่สำเร็จ ❌", error: err.message });
+        }
+        return res.send({ message: "อัปโหลดรูปสำเร็จ ✅", imageUrl: result?.secure_url });
+      }
+    );
+
+    stream.end(req.file.buffer); // ป้อนไฟล์จากเครื่องเข้า stream
+  } catch (e: any) {
+    console.error("❌ Upload Error:", e);
+    res.status(500).send({ message: "อัปโหลดรูปภาพไม่สำเร็จ ❌", error: e?.message });
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* ✅ เพิ่มสินค้าเข้าตะกร้า (Add to Cart)
+   รับข้อมูลจากฝั่งผู้ใช้ เช่น userId, gameId, name, price
+   แล้วบันทึกลง Firestore ใน collection "cart"
+-----------------------------------------------------------------------------*/
+router.post("/user_cart/add", async (req, res) => {
+  try {
+    // ✅ ดึงข้อมูลจาก body ที่ผู้ใช้ส่งมา
+    const { userId, gameId, name, price } = req.body;
+
+    // ✅ ตรวจสอบว่ากรอกข้อมูลครบหรือไม่
+    if (!userId || !gameId || !name || price === undefined)
+      return res.status(400).send({ message: "กรุณากรอกข้อมูลให้ครบ" });
+
+    // ✅ เพิ่มข้อมูลสินค้าใหม่ลงใน collection "cart"
+    const ref = await addDoc(collection(db, "cart"), {
+      userId,       // รหัสผู้ใช้
+      gameId,       // รหัสสินค้า
+      name,         // ชื่อสินค้า
+      price,        // ราคาสินค้า
+      createdAt: new Date(), // วันเวลาที่เพิ่มลงตะกร้า
+    });
+
+    // ✅ ส่งข้อความตอบกลับเมื่อเพิ่มสินค้าสำเร็จ
+    res.send({ message: "เพิ่มสินค้าเข้าตะกร้าสำเร็จ ✅", id: ref.id });
+  } catch (err: any) {
+    // ❌ หากเกิดข้อผิดพลาด จะส่ง error กลับไปให้ client
+    console.error("❌ Error adding to cart:", err);
+    res.status(500).send({ message: "เพิ่มสินค้าไม่สำเร็จ ❌", error: err.message });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* ✅ แสดงสินค้าทั้งหมดในตะกร้า (View Cart)
+   ดึงข้อมูลสินค้าจาก Firestore ตาม userId
+   และคำนวณราคารวมของสินค้าทั้งหมดในตะกร้า
+-----------------------------------------------------------------------------*/
+router.get("/user_cart/:userId", async (req, res) => {
+  try {
+    // ✅ ดึง userId จากพารามิเตอร์ใน URL
+    const { userId } = req.params;
+
+    // ✅ สร้าง query เพื่อค้นหาสินค้าทั้งหมดที่ userId ตรงกัน
+    const q = query(collection(db, "cart"), where("userId", "==", userId));
+
+    // ✅ ดึงเอกสารทั้งหมดจาก Firestore
+    const snap = await getDocs(q);
+
+    // ✅ ถ้าไม่มีสินค้าในตะกร้าเลย
+    if (snap.empty)
+      return res.send({
+        message: "ยังไม่มีสินค้าในตะกร้า",
+        count: 0,         // จำนวนสินค้า = 0
+        totalPrice: 0,    // ราคารวม = 0
+        cartItems: [],    // ไม่มีข้อมูลสินค้า
+      });
+
+    // ✅ แปลงข้อมูลแต่ละเอกสารเป็น object พร้อม id
+    const cartItems = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+    // ✅ คำนวณราคารวมทั้งหมดของสินค้าในตะกร้า
+    const totalPrice = cartItems.reduce((sum: number, i: any) => sum + (i.price ?? 0), 0);
+
+    // ✅ ส่งข้อมูลกลับไปให้ฝั่ง client
+    res.send({
+      message: "ดึงข้อมูลตะกร้าสำเร็จ ✅",
+      count: cartItems.length, // จำนวนสินค้าทั้งหมด
+      totalPrice,              // ราคารวมทั้งหมด
+      cartItems,               // รายการสินค้าในตะกร้า
+    });
+  } catch (err: any) {
+    // ❌ หากเกิดข้อผิดพลาดในการดึงข้อมูล
+    console.error("❌ Error reading cart:", err);
+    res.status(500).send({ message: "ไม่สามารถดึงข้อมูลตะกร้าได้ ❌", error: err.message });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* ✅ ลบสินค้าออกจากตะกร้า (Remove from Cart)
+   ลบเอกสารสินค้าออกจาก Firestore ตาม id ของสินค้า
+-----------------------------------------------------------------------------*/
+router.delete("/user_cart/remove/:id", async (req, res) => {
+  try {
+    // ✅ ดึง id ของสินค้า (เป็น document id ใน Firestore)
+    const { id } = req.params;
+
+    // ✅ ตรวจสอบว่ามีการส่ง id มาหรือไม่
+    if (!id) return res.status(400).send({ message: "กรุณาระบุรหัสสินค้า" });
+
+    // ✅ ลบเอกสารสินค้าตาม id ที่กำหนด
+    await deleteDoc(doc(db, "cart", id));
+
+    // ✅ ส่งข้อความตอบกลับเมื่อการลบสำเร็จ
+    res.send({ message: "ลบสินค้าออกจากตะกร้าสำเร็จ ✅" });
+  } catch (err: any) {
+    // ❌ หากเกิดข้อผิดพลาดในการลบสินค้า
+    console.error("❌ Error removing from cart:", err);
+    res.status(500).send({ message: "ลบสินค้าไม่สำเร็จ ❌", error: err.message });
+  }
+});
+
+
+
+
+// ✅ 4.2 การแสดงราคาหลังใช้โค้ดส่วนลดโปรโมชั่นในตะกร้า
+
+router.post("/user_cart/apply_promo", async (req, res) => {
+  try {
+    const { userId, promoCode } = req.body;
+
+    // ✅ ตรวจสอบว่ากรอกข้อมูลครบหรือไม่
+    if (!userId || !promoCode) {
+      return res
+        .status(400)
+        .send({ message: "กรุณากรอก userId และ promoCode" });
+    }
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ดึงข้อมูลโค้ดโปรโมชั่นจาก Firestore */
+    /* ---------------------------------------------------------------------- */
+    const promoQuery = query(
+      collection(db, "promotions"),
+      where("code", "==", promoCode)
+    );
+    const promoSnap = await getDocs(promoQuery);
+
+    // ❌ ถ้าไม่พบโค้ดส่วนลด
+    if (promoSnap.empty) {
+      return res.status(404).send({ message: "ไม่พบโค้ดส่วนลดนี้ ❌" });
+    }
+
+    // ✅ ดึงเอกสารโปรโมชั่นตัวแรก (เช็กแล้วว่ามี)
+    const promoDoc = promoSnap.docs[0];
+    if (!promoDoc) {
+      return res.status(404).send({ message: "ไม่พบข้อมูลโปรโมชั่น ❌" });
+    }
+
+    // ✅ แปลงข้อมูลโปรโมชั่นออกมา
+    const promo = promoDoc.data() as {
+      code: string;
+      discountPercent: number;
+      isActive: boolean;
+      expireAt?: string;
+    };
+
+    // ❌ ถ้าโค้ดหมดอายุหรือปิดใช้งาน
+    if (!promo.isActive) {
+      return res.status(400).send({ message: "โค้ดนี้หมดอายุแล้ว ❌" });
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ดึงสินค้าทั้งหมดในตะกร้าของ user */
+    /* ---------------------------------------------------------------------- */
+    const cartQuery = query(collection(db, "cart"), where("userId", "==", userId));
+    const cartSnap = await getDocs(cartQuery);
+
+    if (cartSnap.empty) {
+      return res.status(404).send({ message: "ไม่มีสินค้าในตะกร้า ❌" });
+    }
+
+    // ✅ รวมรายการสินค้าในตะกร้า
+    const cartItems = cartSnap.docs.map((d) => d.data() as { price?: number; name?: string });
+    const totalPrice = cartItems.reduce((sum, i) => sum + (i.price ?? 0), 0);
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ คำนวณราคาหลังหักส่วนลด */
+    /* ---------------------------------------------------------------------- */
+    const discountPercent = promo.discountPercent ?? 0;
+    const discount = (totalPrice * discountPercent) / 100;
+    const finalPrice = totalPrice - discount;
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ส่งผลลัพธ์กลับ */
+    /* ---------------------------------------------------------------------- */
+    res.send({
+      message: `ใช้โค้ดส่วนลด ${promoCode} สำเร็จ ✅`,
+      discountPercent,
+      totalPrice,
+      discount,
+      finalPrice,
+    });
+  } catch (err: any) {
+    console.error("❌ Error applying promo:", err);
+    res.status(500).send({
+      message: "เกิดข้อผิดพลาดในการใช้โค้ดส่วนลด ❌",
+      error: err.message,
+    });
+  }
+});
+
+
+// ✅ เพิ่มโค้ดโปรโมชั่นใหม่
+router.post("/promotions/add", async (req, res) => {
+  try {
+    const { code, discountPercent, isActive } = req.body;
+
+    if (!code || discountPercent === undefined || isActive === undefined) {
+      return res.status(400).send({ message: "กรุณากรอกข้อมูลให้ครบ" });
+    }
+
+    // ✅ เพิ่มข้อมูลลง Firestore
+    const ref = await addDoc(collection(db, "promotions"), {
+      code,
+      discountPercent,
+      isActive,
+      createdAt: new Date(),
+    });
+
+    res.send({
+      message: "เพิ่มโปรโมชั่นสำเร็จ ✅",
+      id: ref.id,
+    });
+  } catch (err: any) {
+    console.error("❌ Error adding promotion:", err);
+    res
+      .status(500)
+      .send({ message: "เพิ่มโปรโมชั่นไม่สำเร็จ ❌", error: err.message });
+  }
+});
+
+
+/* -------------------------------------------------------------------------- */
+/* ✅ 4.4 ป้องกันการซื้อซ้ำ (เกมที่เคยซื้อแล้วจะซื้ออีกไม่ได้)
+   ✅ รวมกับ 4.3 การซื้อเกมหลายเกมต่อครั้ง (checkout)
+   - ตรวจสอบรายการในตะกร้า
+   - ตรวจสอบว่าเคยซื้อเกมนั้นไปแล้วหรือยัง
+   - ซื้อเฉพาะเกมที่ยังไม่เคยซื้อ
+   - บันทึกรายการซื้อใหม่ใน transactions
+   - ลบเฉพาะสินค้าที่ซื้อสำเร็จออกจากตะกร้า
+-----------------------------------------------------------------------------*/
+
+router.post("/user_cart/checkout", async (req, res) => {
+  try {
+    const { userId, paymentMethod } = req.body;
+
+    // ✅ ตรวจสอบว่าผู้ใช้กรอก userId มาหรือไม่
+    if (!userId) {
+      return res.status(400).send({ message: "กรุณาระบุ userId" });
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ดึงข้อมูลสินค้าในตะกร้าของผู้ใช้จาก Firestore */
+    /* ---------------------------------------------------------------------- */
+    const cartQuery = query(collection(db, "cart"), where("userId", "==", userId));
+    const cartSnap = await getDocs(cartQuery);
+
+    // ❌ ถ้าไม่มีสินค้าในตะกร้าเลย
+    if (cartSnap.empty) {
+      return res.status(404).send({ message: "ไม่มีสินค้าในตะกร้า ❌" });
+    }
+
+    // ✅ แปลงข้อมูลเอกสารใน Firestore เป็น Object ที่ใช้งานง่าย
+    const cartItems = cartSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ตรวจสอบว่าเกมในตะกร้ามีเกมที่เคยซื้อแล้วหรือไม่ (ป้องกันการซื้อซ้ำ) */
+    /* ---------------------------------------------------------------------- */
+    const transQuery = query(collection(db, "transactions"), where("userId", "==", userId));
+    const transSnap = await getDocs(transQuery);
+
+    // ✅ สร้าง array เก็บ gameId ของเกมที่เคยซื้อแล้ว
+    const purchasedGames: string[] = [];
+
+    // ✅ ดึง gameId ทั้งหมดจากรายการซื้อก่อนหน้า
+    transSnap.forEach((t) => {
+      const data = t.data();
+      if (data.items && Array.isArray(data.items)) {
+        data.items.forEach((item: any) => {
+          purchasedGames.push(item.gameId); // เช่น "game001", "game002"
+        });
+      }
+    });
+
+    // ✅ กรองเฉพาะเกมที่ยังไม่เคยซื้อ
+    const newItems = cartItems.filter((i: any) => !purchasedGames.includes(i.gameId));
+
+    // ❌ ถ้าเกมทั้งหมดในตะกร้าเคยซื้อไปแล้ว
+    if (newItems.length === 0) {
+      return res.status(400).send({ message: "คุณได้ซื้อเกมทั้งหมดนี้ไปแล้ว ❌" });
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ คำนวณราคารวมของเฉพาะเกมที่ยังไม่เคยซื้อ */
+    /* ---------------------------------------------------------------------- */
+    const totalPrice = newItems.reduce((sum: number, i: any) => sum + (i.price ?? 0), 0);
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ สร้างข้อมูลธุรกรรม (Transaction Data) เพื่อบันทึกลง Firestore */
+    /* ---------------------------------------------------------------------- */
+    const transactionData = {
+      userId,
+      items: newItems.map((i: any) => ({
+        gameId: i.gameId,
+        name: i.name,
+        price: i.price,
+      })),
+      totalPrice,
+      paymentMethod: paymentMethod || "CreditCard", // ค่าเริ่มต้นคือบัตรเครดิต
+      createdAt: new Date(),
+      status: "Success", // สถานะการซื้อ
+    };
+
+    // ✅ เพิ่มข้อมูลธุรกรรมนี้ลงใน collection "transactions"
+    await addDoc(collection(db, "transactions"), transactionData);
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ลบเฉพาะสินค้าที่ซื้อสำเร็จออกจากตะกร้า (ไม่ลบเกมที่เคยซื้อแล้ว) */
+    /* ---------------------------------------------------------------------- */
+    const deletePromises = newItems.map((i: any) => deleteDoc(doc(db, "cart", i.id)));
+    await Promise.all(deletePromises);
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ส่งผลลัพธ์กลับไปให้ฝั่ง client */
+    /* ---------------------------------------------------------------------- */
+    res.send({
+      message: "ชำระเงินสำเร็จ ✅",
+      totalPrice,
+      transaction: transactionData,
+    });
+
+  } catch (err: any) {
+    // ❌ หากเกิดข้อผิดพลาดขณะทำงาน
+    console.error("❌ Error during checkout:", err);
+    res.status(500).send({
+      message: "เกิดข้อผิดพลาดในการชำระเงิน ❌",
+      error: err.message,
+    });
+  }
+});
+
+
+/* -------------------------------------------------------------------------- */
+/* ✅ 4.5 หน้าคลังเกม (แสดงเกมที่ผู้ใช้ซื้อแล้ว - เวอร์ชันสมบูรณ์)
+   - ดึงข้อมูลจาก "transactions" ของ user
+   - รวมทุกเกมที่ซื้อสำเร็จ และลบเกมซ้ำตาม gameId (normalize)
+   - ดึงรายละเอียดเกมจาก "games" (ชื่อ, ประเภท, รูปภาพ, รายละเอียด)
+   - เรียงจากวันที่ซื้อใหม่สุด -> เก่าสุด
+-----------------------------------------------------------------------------*/
+
+router.get("/user_library/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId)
+      return res.status(400).send({ message: "กรุณาระบุ userId" });
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ดึงธุรกรรมทั้งหมดของ user */
+    /* ---------------------------------------------------------------------- */
+    const transQuery = query(
+      collection(db, "transactions"),
+      where("userId", "==", userId)
+    );
+    const transSnap = await getDocs(transQuery);
+
+    if (transSnap.empty)
+      return res.status(404).send({ message: "ยังไม่มีเกมที่คุณซื้อไว้ ❌" });
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ รวมเกมทั้งหมดจากทุกธุรกรรม */
+    /* ---------------------------------------------------------------------- */
+    let allGames: any[] = [];
+    transSnap.forEach((t) => {
+      const data = t.data();
+      if (data.items && Array.isArray(data.items)) {
+        data.items.forEach((item: any) => {
+          allGames.push({
+            ...item,
+            createdAt: data.createdAt || new Date(), // เก็บวันที่ซื้อ
+          });
+        });
+      }
+    });
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ลบเกมซ้ำ (normalize ด้วย trim().toLowerCase()) */
+    /* ---------------------------------------------------------------------- */
+    const uniqueGamesMap = new Map<string, any>();
+    allGames.forEach((g) => {
+      if (g.gameId) {
+        const normalizedId = g.gameId.trim().toLowerCase();
+        if (!uniqueGamesMap.has(normalizedId)) {
+          uniqueGamesMap.set(normalizedId, g);
+        }
+      }
+    });
+
+    const uniqueGames = Array.from(uniqueGamesMap.values());
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ดึงรายละเอียดเกมจาก collection "games" */
+    /* ---------------------------------------------------------------------- */
+    const detailedGames = await Promise.all(
+      uniqueGames.map(async (g) => {
+        try {
+          const gameRef = doc(db, "games", g.gameId);
+          const gameSnap = await getDoc(gameRef);
+          if (gameSnap.exists()) {
+            const gameData = gameSnap.data();
+            return {
+              ...g,
+              category: gameData.category || "",
+              description: gameData.description || "",
+              imageUrl: gameData.imageUrl || "",
+            };
+          }
+          return g;
+        } catch (error) {
+          console.warn("⚠️ ดึงรายละเอียดเกมไม่สำเร็จ:", error);
+          return g;
+        }
+      })
+    );
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ เรียงจากวันที่ซื้อล่าสุด -> เก่าสุด */
+    /* ---------------------------------------------------------------------- */
+    detailedGames.sort(
+      (a, b) =>
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ส่งผลลัพธ์กลับ */
+    /* ---------------------------------------------------------------------- */
+    res.send({
+      message: "ดึงข้อมูลคลังเกมสำเร็จ ✅",
+      count: detailedGames.length,
+      purchasedGames: detailedGames,
+    });
+  } catch (err: any) {
+    console.error("❌ Error loading library:", err);
+    res.status(500).send({
+      message: "เกิดข้อผิดพลาดในการดึงคลังเกม ❌",
+      error: err.message,
+    });
+  }
+});
+
+
+
+
+/* -------------------------------------------------------------------------- */
+/* ✅ 4.6 ดูรายละเอียดเกมจากคลังที่ซื้อแล้ว (เฉพาะเกมที่ user เคยซื้อ) */
+/* -------------------------------------------------------------------------- */
+router.get("/user_library/detail/:gameId", async (req, res) => {
+  try {
+    const { gameId } = req.params;
+
+    if (!gameId) {
+      return res.status(400).send({ message: "กรุณาระบุ gameId" });
+    }
+
+    // ✅ ดึงข้อมูลจาก collection "games"
+    const gameRef = doc(db, "games", gameId);
+    const gameSnap = await getDoc(gameRef);
+
+    if (!gameSnap.exists()) {
+      return res.status(404).send({ message: "ไม่พบข้อมูลเกมนี้ ❌" });
+    }
+
+    const gameData = gameSnap.data();
+
+    res.send({
+      message: "ดึงรายละเอียดเกมสำเร็จ ✅",
+      game: {
+        id: gameSnap.id,
+        name: gameData.name,
+        category: gameData.category,
+        price: gameData.price,
+        description: gameData.description || "",
+        imageUrl: gameData.imageUrl || "",
+        releaseDate: gameData.releaseDate || "",
+        createdAt: gameData.createdAt || "",
+      },
+    });
+  } catch (err: any) {
+    console.error("❌ Error loading game detail:", err);
+    res.status(500).send({
+      message: "เกิดข้อผิดพลาดในการดึงรายละเอียดเกม ❌",
+      error: err.message,
+    });
+  }
+});
+
+
+
+/* -------------------------------------------------------------------------- */
+/* ✅ 4.7 การจัดอันดับเกมขายดี (Top Ranking ≥5 อันดับ)
+   - ดึงข้อมูลจาก transactions
+   - นับจำนวนครั้งที่แต่ละเกมถูกซื้อ
+   - รวมยอดขาย (revenue)
+   - จัดเรียงจากขายมากสุด → น้อยสุด
+   - แสดงอย่างน้อย 5 อันดับ
+-----------------------------------------------------------------------------*/
+router.get("/ranking/top-games", async (req, res) => {
+  try {
+    // ✅ ดึงข้อมูลธุรกรรมทั้งหมดจาก Firestore
+    const transSnap = await getDocs(collection(db, "transactions"));
+
+    if (transSnap.empty) {
+      return res.status(404).send({ message: "ยังไม่มีข้อมูลการซื้อเกม ❌" });
+    }
+
+    // ✅ เก็บยอดขายแต่ละเกม (จำนวนครั้ง และรายได้รวม)
+    const salesMap: Record<
+      string,
+      { name: string; count: number; totalRevenue: number }
+    > = {};
+
+    transSnap.forEach((t) => {
+      const data = t.data();
+      if (data.items && Array.isArray(data.items)) {
+        data.items.forEach((item: any) => {
+          const { gameId, name, price } = item;
+          if (!salesMap[gameId]) {
+            salesMap[gameId] = { name, count: 0, totalRevenue: 0 };
+          }
+          salesMap[gameId].count += 1;
+          salesMap[gameId].totalRevenue += price ?? 0;
+        });
+      }
+    });
+
+    // ✅ แปลงเป็น array เพื่อเรียงลำดับ
+    const ranking = Object.entries(salesMap)
+      .map(([gameId, data]) => ({
+        gameId,
+        name: data.name,
+        soldCount: data.count,
+        totalRevenue: data.totalRevenue,
+      }))
+      .sort((a, b) => b.soldCount - a.soldCount) // เรียงจากขายมากสุด → น้อยสุด
+      .slice(0, 5); // แสดงแค่ 5 อันดับแรก
+
+    // ✅ ส่งผลลัพธ์กลับ
+    res.send({
+      message: "ดึงอันดับเกมขายดีสำเร็จ ✅",
+      count: ranking.length,
+      ranking,
+    });
+  } catch (err: any) {
+    console.error("❌ Error ranking games:", err);
+    res.status(500).send({
+      message: "เกิดข้อผิดพลาดในการจัดอันดับเกม ❌",
+      error: err.message,
+    });
+  }
+});
+
+
+
+
+// 5.1 Admin กำหนดโค้ดส่วนลด (เพิ่ม/ลบ/แก้ไข)
+router.post("/admin/discount/add", async (req, res) => {
+  try {
+    const { code, discountPercent, usageLimit, expiredAt } = req.body;
+
+    if (!code || !discountPercent)
+      return res.status(400).send({ message: "กรุณาระบุ code และ discountPercent" });
+
+    await addDoc(collection(db, "discount_codes"), {
+      code: code.toUpperCase(),
+      discountPercent,
+      usageLimit: usageLimit || 1,
+      usedCount: 0,
+      expiredAt: expiredAt ? new Date(expiredAt) : null,
+      active: true,
+      usersUsed: [],
+      createdAt: new Date(),
+    });
+
+    res.send({ message: "เพิ่มโค้ดส่วนลดสำเร็จ ✅" });
+  } catch (err: any) {
+    res.status(500).send({ message: "เกิดข้อผิดพลาด", error: err.message });
+  }
+});
+
+
+
+router.put("/admin/discount/:code", async (req, res) => {
+  try {
+    const code = req.params.code;
+    const updateData = req.body;
+
+    // ✅ ค้นหาโค้ดใน Firestore
+    const q = query(
+      collection(db, "discount_codes"),
+      where("code", "==", code.toUpperCase())
+    );
+    const snap = await getDocs(q);
+
+    if (snap.empty)
+      return res.status(404).send({ message: "ไม่พบโค้ดนี้ ❌" });
+
+    // ✅ ใช้ id ของเอกสารแทนการใช้ .ref
+    const docId = (snap.docs[0] as any).id;
+    const docRef = doc(db, "discount_codes", docId);
+
+    // ✅ อัปเดตข้อมูล
+    await updateDoc(docRef, updateData);
+
+    res.send({ message: "แก้ไขโค้ดสำเร็จ ✅" });
+  } catch (err: any) {
+    console.error("❌ Error updating discount:", err);
+    res
+      .status(500)
+      .send({ message: "เกิดข้อผิดพลาด", error: err.message });
+  }
+});
+
+
+/* -------------------------------------------------------------------------- */
+/* ✅ 5.3–5.4 การใช้โค้ดส่วนลดในตะกร้า (User Apply Discount)
+   - ตรวจสอบว่าโค้ดมีอยู่หรือไม่
+   - ตรวจสอบหมดอายุ (expiredAt)
+   - ตรวจสอบจำนวนครั้งที่ใช้ได้ (usageLimit)
+   - ตรวจสอบว่า user เคยใช้โค้ดนี้แล้วหรือยัง
+   - คำนวณราคาหลังหักส่วนลด
+   - บันทึกจำนวนการใช้งาน (usedCount +1)
+   - ปิดโค้ด (active=false) เมื่อหมดอายุหรือครบ limit
+-----------------------------------------------------------------------------*/
+
+router.post("/user_cart/apply_discount", async (req, res) => {
+  try {
+    const { userId, promoCode } = req.body;
+
+    if (!userId || !promoCode) {
+      return res.status(400).send({ message: "กรุณาระบุ userId และ promoCode" });
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ค้นหาโค้ดใน Firestore */
+    /* ---------------------------------------------------------------------- */
+    const q = query(collection(db, "discount_codes"), where("code", "==", promoCode.toUpperCase()));
+    const snap = await getDocs(q);
+
+    if (snap.empty) {
+      return res.status(404).send({ message: "ไม่พบโค้ดส่วนลดนี้ ❌" });
+    }
+
+    const docRef = (snap.docs[0] as any).ref;
+    const promo = (snap.docs[0] as any).data();
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ตรวจสอบสถานะโค้ด */
+    /* ---------------------------------------------------------------------- */
+    if (!promo.active) {
+      return res.status(400).send({ message: "โค้ดนี้ถูกปิดการใช้งานแล้ว ❌" });
+    }
+
+    // ตรวจสอบวันหมดอายุ
+    if (promo.expiredAt && promo.expiredAt.toDate && promo.expiredAt.toDate() < new Date()) {
+      await updateDoc(docRef, { active: false });
+      return res.status(400).send({ message: "โค้ดนี้หมดอายุแล้ว ❌" });
+    }
+
+    // ตรวจสอบจำนวนการใช้งานเกิน limit
+    if (promo.usageLimit && promo.usedCount >= promo.usageLimit) {
+      await updateDoc(docRef, { active: false });
+      return res.status(400).send({ message: "โค้ดนี้ถูกใช้ครบจำนวนแล้ว ❌" });
+    }
+
+    // ตรวจสอบว่า user เคยใช้โค้ดนี้ไปแล้วหรือยัง
+    if (promo.usersUsed && promo.usersUsed.includes(userId)) {
+      return res.status(400).send({ message: "คุณเคยใช้โค้ดนี้แล้ว ❌" });
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ดึงตะกร้าของผู้ใช้มาคำนวณราคา */
+    /* ---------------------------------------------------------------------- */
+    const cartQuery = query(collection(db, "cart"), where("userId", "==", userId));
+    const cartSnap = await getDocs(cartQuery);
+
+    if (cartSnap.empty) {
+      return res.status(404).send({ message: "ไม่มีสินค้าในตะกร้า ❌" });
+    }
+
+    const cartItems = cartSnap.docs.map((d) => d.data());
+    const totalPrice = cartItems.reduce((sum, i) => sum + (i.price ?? 0), 0);
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ คำนวณส่วนลด */
+    /* ---------------------------------------------------------------------- */
+    const discountPercent = promo.discountPercent ?? 0;
+    const discount = (totalPrice * discountPercent) / 100;
+    const finalPrice = totalPrice - discount;
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ อัปเดตสถานะโค้ด (เพิ่มจำนวนการใช้งาน และจำว่า user คนนี้ใช้แล้ว) */
+    /* ---------------------------------------------------------------------- */
+    const newUsedCount = (promo.usedCount || 0) + 1;
+    const updatedUsers = [...(promo.usersUsed || []), userId];
+
+    await updateDoc(docRef, {
+      usedCount: newUsedCount,
+      usersUsed: updatedUsers,
+      active:
+        promo.usageLimit && newUsedCount >= promo.usageLimit
+          ? false
+          : promo.active,
+    });
+
+    /* ---------------------------------------------------------------------- */
+    /* ✅ ส่งผลลัพธ์กลับ */
+    /* ---------------------------------------------------------------------- */
+    res.send({
+      message: `ใช้โค้ดส่วนลด ${promoCode} สำเร็จ ✅`,
+      discountPercent,
+      totalPrice,
+      discount,
+      finalPrice,
+    });
+  } catch (err: any) {
+    console.error("❌ Error applying discount:", err);
+    res.status(500).send({
+      message: "เกิดข้อผิดพลาดในการใช้โค้ดส่วนลด ❌",
+      error: err.message,
+    });
+  }
+});
+
+
+
 
 
 
