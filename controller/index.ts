@@ -750,63 +750,71 @@ router.get("/admin/transactions", async (req, res) => {
 
 
 // ✅ 3.3 ซื้อเกม (หักเงินออกจาก Wallet + บันทึกธุรกรรม + ป้องกันซื้อซ้ำ)
+// ✅ 3.3 ซื้อเกม (เดี่ยว) — บันทึก items[] เพื่อให้ ranking/คลังเกมใช้งานได้
 router.post("/wallet_purchase", async (req, res) => {
   try {
-    const { userId, gameName, amount } = req.body;
+    const { userId, gameId, gameName, amount } = req.body;
 
-    // 🔹 ตรวจสอบข้อมูลที่รับมา
-    if (!userId || !gameName || !amount)
-      return res.status(400).send({ message: "กรุณาระบุ userId, gameName และ amount" });
-
-    // 🔹 ตรวจสอบว่าผู้ใช้เคยซื้อเกมนี้ไปแล้วหรือยัง
-    const checkPurchase = query(
-      collection(db, "transactions"),
-      where("userId", "==", userId),
-      where("type", "==", "purchase"),
-      where("detail", "==", `ซื้อเกม ${gameName}`)
-    );
-    const purchaseSnap = await getDocs(checkPurchase);
-
-    if (!purchaseSnap.empty) {
-      return res.status(400).send({
-        message: `คุณได้ซื้อเกม "${gameName}" แล้วก่อนหน้านี้ ❌`,
-      });
+    if (!userId || !gameId || !gameName || !amount) {
+      return res.status(400).send({ message: "กรุณาระบุ userId, gameId, gameName และ amount" });
     }
 
-    // 🔹 อ้างอิงกระเป๋าเงิน
+    // ❗ ป้องกันซื้อซ้ำ (ดูว่า user เคยซื้อ gameId นี้แล้วหรือยัง)
+    const txQ = query(collection(db, "transactions"), where("userId", "==", userId));
+    const txSnap = await getDocs(txQ);
+    const alreadyBought = txSnap.docs.some((d) => {
+      const data: any = d.data();
+      return Array.isArray(data.items) && data.items.some((it: any) => it.gameId === gameId);
+    });
+    if (alreadyBought) {
+      return res.status(400).send({ message: `คุณได้ซื้อเกมนี้แล้วก่อนหน้านี้ ❌` });
+    }
+
+    // กระเป๋าเงิน
     const walletRef = doc(db, "wallets", userId);
     const walletSnap = await getDoc(walletRef);
+    if (!walletSnap.exists()) return res.status(404).send({ message: "ไม่พบบัญชีกระเป๋าเงิน" });
 
-    if (!walletSnap.exists())
-      return res.status(404).send({ message: "ไม่พบบัญชีกระเป๋าเงิน" });
-
-    const balance = walletSnap.data().balance ?? 0;
-
-    // 🔹 ตรวจสอบยอดเงินคงเหลือ
-    if (balance < amount)
+    const balance = Number(walletSnap.data().balance ?? 0);
+    const price = Number(amount);
+    if (!Number.isFinite(price) || price <= 0) {
+      return res.status(400).send({ message: "จำนวนเงินไม่ถูกต้อง" });
+    }
+    if (balance < price) {
       return res.status(400).send({ message: "ยอดเงินไม่พอสำหรับซื้อเกม ❌" });
+    }
 
-    const newBalance = balance - amount;
+    const newBalance = balance - price;
 
-    // 🔹 อัปเดตยอดเงินในกระเป๋า
+    // อัปเดตกระเป๋า
     await updateDoc(walletRef, {
       balance: newBalance,
       lastUpdated: new Date(),
     });
 
-    // 🔹 เพิ่มธุรกรรมใหม่
+    // ✅ บันทึกรายการซื้อในรูปแบบ items[] (สำคัญสำหรับ ranking/คลังเกม)
     await addDoc(collection(db, "transactions"), {
       userId,
       type: "purchase",
-      amount,
-      detail: `ซื้อเกม ${gameName}`,
+      amount: price,
+      totalPrice: price,
+      items: [
+        {
+          gameId,
+          name: gameName,
+          price,
+        },
+      ],
+      paymentMethod: "Wallet",
       createdAt: new Date(),
+      status: "Success",
+      detail: `ซื้อเกม ${gameName}`,
     });
 
     res.send({
       message: `ซื้อเกม ${gameName} สำเร็จ ✅`,
       balance: newBalance,
-      spent: amount,
+      spent: price,
     });
   } catch (err: any) {
     console.error("❌ Error purchase:", err);
@@ -816,6 +824,8 @@ router.post("/wallet_purchase", async (req, res) => {
     });
   }
 });
+
+
 
 // ✅ อัปโหลดรูปภาพ “อย่างเดียว” เพื่อเอา URL ไปอัปเดตเกม (ตอนแก้ไข)
 // index.ts (router)
@@ -1336,51 +1346,60 @@ router.get("/user_library/detail/:gameId", async (req, res) => {
    - จัดเรียงจากขายมากสุด → น้อยสุด
    - แสดงอย่างน้อย 5 อันดับ
 -----------------------------------------------------------------------------*/
-router.get("/ranking/top-games", async (req, res) => {
+router.get("/ranking/top-games", async (_req, res) => {
   try {
-    // ✅ ดึงข้อมูลธุรกรรมทั้งหมดจาก Firestore
     const transSnap = await getDocs(collection(db, "transactions"));
-
     if (transSnap.empty) {
-      return res.status(404).send({ message: "ยังไม่มีข้อมูลการซื้อเกม ❌" });
+      return res.send({ message: "ยังไม่มีข้อมูลการซื้อเกม", count: 0, ranking: [] });
     }
 
-    // ✅ เก็บยอดขายแต่ละเกม (จำนวนครั้ง และรายได้รวม)
-    const salesMap: Record<
-      string,
-      { name: string; count: number; totalRevenue: number }
-    > = {};
-
+    // นับยอดขายต่อเกม
+    const salesMap: Record<string, { name: string; count: number; totalRevenue: number }> = {};
     transSnap.forEach((t) => {
-      const data = t.data();
-      if (data.items && Array.isArray(data.items)) {
-        data.items.forEach((item: any) => {
-          const { gameId, name, price } = item;
-          if (!salesMap[gameId]) {
-            salesMap[gameId] = { name, count: 0, totalRevenue: 0 };
-          }
-          salesMap[gameId].count += 1;
-          salesMap[gameId].totalRevenue += price ?? 0;
+      const data: any = t.data();
+      if (Array.isArray(data.items)) {
+        data.items.forEach((it: any) => {
+          const gid = String(it.gameId || "").trim();
+          if (!gid) return;
+          if (!salesMap[gid]) salesMap[gid] = { name: it.name || "-", count: 0, totalRevenue: 0 };
+          salesMap[gid].count += 1;
+          salesMap[gid].totalRevenue += Number(it.price ?? 0);
         });
       }
     });
 
-    // ✅ แปลงเป็น array เพื่อเรียงลำดับ
-    const ranking = Object.entries(salesMap)
-      .map(([gameId, data]) => ({
-        gameId,
-        name: data.name,
-        soldCount: data.count,
-        totalRevenue: data.totalRevenue,
-      }))
-      .sort((a, b) => b.soldCount - a.soldCount) // เรียงจากขายมากสุด → น้อยสุด
-      .slice(0, 5); // แสดงแค่ 5 อันดับแรก
+    // แปลงเป็นอาร์เรย์ + เรียงมาก→น้อย และเก็บอย่างน้อย 5 รายการ
+    const topIds = Object.entries(salesMap)
+      .map(([gameId, v]) => ({ gameId, name: v.name, soldCount: v.count, totalRevenue: v.totalRevenue }))
+      .sort((a, b) => b.soldCount - a.soldCount)
+      .slice(0, 5);
 
-    // ✅ ส่งผลลัพธ์กลับ
+    // เติมข้อมูลเกมจาก "games"
+    const enriched = await Promise.all(
+      topIds.map(async (g) => {
+        try {
+          const ref = doc(db, "games", g.gameId);
+          const snap = await getDoc(ref);
+          if (snap.exists()) {
+            const d: any = snap.data();
+            return {
+              ...g,
+              price: Number(d.price ?? 0),
+              category: d.category || "",
+              imageUrl: d.imageUrl || "",
+              releaseDate: d.releaseDate || d.createdAt || null,
+              CreatedAt: d.createdAt || null,
+            };
+          }
+        } catch {}
+        return g; // ถ้าหาไม่เจอ ก็ส่งเท่าที่มี
+      })
+    );
+
     res.send({
       message: "ดึงอันดับเกมขายดีสำเร็จ ✅",
-      count: ranking.length,
-      ranking,
+      count: enriched.length,
+      ranking: enriched,
     });
   } catch (err: any) {
     console.error("❌ Error ranking games:", err);
@@ -1562,6 +1581,38 @@ router.post("/user_cart/apply_discount", async (req, res) => {
     });
   }
 });
+
+// ✅ list โค้ดส่วนลดทั้งหมด
+router.get("/admin/discount/list", async (_req, res) => {
+  try {
+    const snap = await getDocs(collection(db, "discount_codes"));
+    const items = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+    res.send({ message: "ok", items });
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).send({ message: "list error", error: err.message });
+  }
+});
+
+// ✅ ลบโค้ดด้วย code (ใช้ตอนกดปุ่มลบในหน้าเว็บ)
+router.delete("/admin/discount/:code", async (req, res) => {
+  try {
+    const code = (req.params.code || "").toUpperCase();
+    const q = query(collection(db, "discount_codes"), where("code", "==", code));
+    const snap = await getDocs(q);
+    if (snap.empty) return res.status(404).send({ message: "ไม่พบโค้ดนี้ ❌" });
+   const first = snap.docs[0]!;          // บอก TS ว่าไม่ใช่ undefined แน่
+const docId = first.id;
+await deleteDoc(doc(db, "discount_codes", docId));
+res.send({ message: "ลบโค้ดสำเร็จ ✅" });
+    await deleteDoc(doc(db, "discount_codes", docId));
+    res.send({ message: "ลบโค้ดสำเร็จ ✅" });
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).send({ message: "delete error", error: err.message });
+  }
+});
+
 
 
 
